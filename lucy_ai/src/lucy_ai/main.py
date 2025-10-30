@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     SOLANA_RPC_URL: str = "https://api.devnet.solana.com"
 
     # CORS Configuration
-    CORS_ORIGINS: str = "*"
+    CORS_ORIGINS: str = "http://localhost:3000"
     CORS_CREDENTIALS: bool = True
     CORS_METHODS: str = "*"
     CORS_HEADERS: str = "*"
