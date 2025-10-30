@@ -44,18 +44,12 @@ export const send = async (req: Request, res: Response) => {
       where: { id: req.userId },
     });
     if (!sender) return res.status(404).json({ error: "Sender not found" });
-
-    //  Resolve recipient
+    //  Resolve recipient (wallet address only)
     let recipientPubkey: PublicKey;
-    if (recipient.includes("@")) {
-      const recipientUser = await prisma.user.findUnique({
-        where: { email: recipient },
-      });
-      if (!recipientUser)
-        return res.status(404).json({ error: "Recipient not found" });
-      recipientPubkey = new PublicKey(recipientUser.solanaPubkey);
-    } else {
+    try {
       recipientPubkey = new PublicKey(recipient);
+    } catch {
+      return res.status(400).json({ error: "Invalid recipient address" });
     }
 
     const senderPk = new PublicKey(sender.solanaPubkey);
@@ -198,7 +192,6 @@ export const monitor = async (req: Request, res: Response) => {
       allSignatures.push(...sigs);
     }
     
-    // remove duplicates by signature
     const signatures = Array.from(
       new Map(allSignatures.map(s => [s.signature, s])).values()
     );
@@ -229,8 +222,10 @@ export const monitor = async (req: Request, res: Response) => {
       let detectedToken = 'SOL';
       let amount = 0;
       let type: 'send' | 'receive' = 'receive';
+      let recipient: string | null = null;
+      let senderAddress: string | null = null;
 
-      // ----------------  detect SPL token movement ----------------
+      // ----------------  Detect SPL Token Movement ----------------
       const preTokenBalances = txInfo.meta.preTokenBalances || [];
       const postTokenBalances = txInfo.meta.postTokenBalances || [];
 
@@ -250,7 +245,6 @@ export const monitor = async (req: Request, res: Response) => {
         amount = Math.abs(deltaRaw) / Math.pow(10, decimals);
         type = deltaRaw > 0 ? 'receive' : 'send';
 
-        // Match mint to known token
         detectedToken =
           Object.keys(TOKEN_MINTS).find(
             key => TOKEN_MINTS[key].toBase58() === post.mint
@@ -269,7 +263,6 @@ export const monitor = async (req: Request, res: Response) => {
           const postLamports = txInfo.meta.postBalances[userIndex];
           const deltaLamports = postLamports - preLamports;
 
-          // Ignore tiny SOL fee changes (<0.000001 SOL)
           if (Math.abs(deltaLamports) > 1000) {
             amount = Math.abs(deltaLamports) / LAMPORTS_PER_SOL;
             type = deltaLamports > 0 ? 'receive' : 'send';
@@ -280,6 +273,97 @@ export const monitor = async (req: Request, res: Response) => {
 
       if (amount === 0) continue;
 
+      // ---------------- Extract Recipient (Only for 'send') ----------------
+      if (type === 'send') {
+        const message = txInfo.transaction.message;
+        const instructions = message.compiledInstructions;
+        const accountKeys = message.staticAccountKeys;
+
+        for (const ix of instructions) {
+          const programId = accountKeys[ix.programIdIndex].toBase58();
+
+          // --- SOL Transfer ---
+          if (programId === SystemProgram.programId.toBase58()) {
+            const data = ix.data;
+            if (data[0] === 2) { // SystemProgram.transfer
+              const fromIdx = ix.accountKeyIndexes[0];
+              const toIdx = ix.accountKeyIndexes[1];
+              const from = accountKeys[fromIdx].toBase58();
+              if (from === user.solanaPubkey) {
+                recipient = accountKeys[toIdx].toBase58();
+                break;
+              }
+            }
+          }
+
+          // --- SPL Token Transfer ---
+          if (programId === TOKEN_PROGRAM_ID.toBase58()) {
+            const data = ix.data;
+            // Transfer (instruction index 3) or TransferChecked (12)
+            if (data[0] === 3 || data[0] === 12) {
+              const sourceIdx = ix.accountKeyIndexes[0];
+              const destIdx = ix.accountKeyIndexes[2]; // owner is 1, dest is 2
+              const ownerIdx = ix.accountKeyIndexes[1];
+              const source = accountKeys[sourceIdx].toBase58();
+              const owner = accountKeys[ownerIdx].toBase58();
+
+              if (owner === user.solanaPubkey) {
+                // Find source ATA to confirm it's user's
+                const sourceATA = await getAssociatedTokenAddress(
+                  new PublicKey(postTokenBalances[0]?.mint || TOKEN_MINTS.USDC),
+                  userPk
+                );
+                if (source === sourceATA.toBase58()) {
+                  recipient = accountKeys[destIdx].toBase58();
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+       // ---------------- Extract Sender (Only for 'receive') ----------------
+if (type === 'receive') {
+  const message = txInfo.transaction.message;
+  const instructions = message.compiledInstructions;
+  const accountKeys = message.staticAccountKeys;
+
+  for (const ix of instructions) {
+    const programId = accountKeys[ix.programIdIndex].toBase58();
+
+    // --- SOL Transfer ---
+    if (programId === SystemProgram.programId.toBase58()) {
+      const data = ix.data;
+      if (data[0] === 2) { // SystemProgram.transfer
+        const fromIdx = ix.accountKeyIndexes[0];
+        const toIdx = ix.accountKeyIndexes[1];
+        const to = accountKeys[toIdx].toBase58();
+        if (to === user.solanaPubkey) {
+          senderAddress = accountKeys[fromIdx].toBase58();
+          break;
+        }
+      }
+    }
+
+    // --- SPL Token Transfer ---
+    if (programId === TOKEN_PROGRAM_ID.toBase58()) {
+      const data = ix.data;
+      // Transfer (3) or TransferChecked (12)
+      if (data[0] === 3 || data[0] === 12) {
+        const sourceIdx = ix.accountKeyIndexes[0];
+        const destIdx = ix.accountKeyIndexes[2];
+        const ownerIdx = ix.accountKeyIndexes[1];
+        const dest = accountKeys[destIdx].toBase58();
+
+        if (dest === user.solanaPubkey || postTokenBalances.some(b => b.owner === user.solanaPubkey)) {
+          senderAddress = accountKeys[sourceIdx].toBase58();
+          break;
+        }
+      }
+    }
+  }
+}
+      // ---------------- Save to DB ----------------
       const createdTx = await prisma.transaction.create({
         data: {
           txHash: sig.signature,
@@ -288,6 +372,8 @@ export const monitor = async (req: Request, res: Response) => {
           token: detectedToken,
           amount,
           type,
+          recipient, // Now saved for 'send'!
+          sender: senderAddress,
           timestamp: new Date(sig.blockTime ? sig.blockTime * 1000 : Date.now()),
         },
       });
@@ -297,6 +383,8 @@ export const monitor = async (req: Request, res: Response) => {
         token: createdTx.token,
         amount: createdTx.amount,
         type: createdTx.type,
+        recipient: createdTx.recipient,
+        sender: createdTx.sender,
         timestamp: createdTx.timestamp,
       });
     }

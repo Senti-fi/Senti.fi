@@ -14,6 +14,8 @@ enum TransactionType {
   reward
   onramp
   offramp
+  send
+  receive
 }
 
 enum TransactionStatus {
@@ -41,6 +43,7 @@ model VaultPlan {
   name        String   @unique
   riskType    String
   apy         Float
+  vaultPubkey String?
   minLockDays Int
   minDeposit  Float
   description String?
@@ -49,15 +52,14 @@ model VaultPlan {
   updatedAt   DateTime @updatedAt
 
   vaults Vault[]
-
   @@map("vault_plans")
 }
 
 model Vault {
   id            String   @id @default(uuid()) @db.Uuid
-  vaultPlanId   String?  @db.Uuid
-  name          String
-  vaultPubkey   String   @unique
+  vaultPlanId   String   @db.Uuid
+  name          String?
+  vaultPubkey   String
   token         String
   symbol        String
   yieldRate     Float
@@ -65,10 +67,12 @@ model Vault {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  vaultPlan    VaultPlan?    @relation(fields: [vaultPlanId], references: [id], onDelete: Cascade)
+  vaultPlan    VaultPlan   @relation(fields: [vaultPlanId], references: [id], onDelete: Cascade)
   userVaults   UserVault[]
   transactions Transaction[] @relation("VaultTransactions")
 
+  @@unique([vaultPlanId, token])  
+  @@index([vaultPubkey])
   @@map("vaults")
 }
 
@@ -90,6 +94,7 @@ model UserVault {
 
   @@index([userId])
   @@index([vaultId])
+  @@unique([userId, vaultId])
   @@map("user_vaults")
 }
 
@@ -107,6 +112,7 @@ model Transaction {
   status        TransactionStatus @default(pending)
   provider      String?
   recipient     String?
+  sender        String?
   timestamp     DateTime          @default(now())
 
   userVault UserVault? @relation(fields: [userVaultId], references: [id])

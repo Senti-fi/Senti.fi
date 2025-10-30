@@ -1,268 +1,398 @@
 import { Request, Response } from 'express';
-import { Connection, PublicKey, SystemProgram, TransactionInstruction } from '@solana/web3.js';
-import { getAssociatedTokenAddress, createTransferCheckedInstruction } from '@solana/spl-token';
-import { PrismaClient } from '@prisma/client';
-import sanitizeHtml from 'sanitize-html';
+import {
+  Connection,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  sendAndConfirmTransaction,
+  Keypair,
+} from '@solana/web3.js';
+import {
+  getAssociatedTokenAddress,
+  createTransferCheckedInstruction,
+  createAssociatedTokenAccountInstruction,
+  getAccount,
+  TOKEN_PROGRAM_ID,
+} from '@solana/spl-token';
+import { PrismaClient, TransactionType, TransactionStatus } from '@prisma/client';
 import logger from '../utils/logger';
 
 const prisma = new PrismaClient();
 const connection = new Connection(process.env.SOLANA_RPC || 'https://api.devnet.solana.com', 'confirmed');
 
+// === CONFIG ===
 const TOKEN_MINTS: Record<string, PublicKey> = {
-  USDC: new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),
+  USDC: new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'), // DEVNET
   USDT: new PublicKey('Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'),
   SOL: new PublicKey('So11111111111111111111111111111111111111112'),
 };
 
-const MASTER_WALLETS: Record<string, string> = {
-  USDC: process.env.USDC_MASTER_WALLET_PUBKEY || '',
-  USDT: process.env.USDT_MASTER_WALLET_PUBKEY || '',
-  SOL: process.env.SOL_MASTER_WALLET_PUBKEY || '',
-};
-
-const DECIMALS = { USDC: 6, USDT: 6, SOL: 9 };
+const DECIMALS: Record<string, number> = { USDC: 6, USDT: 6, SOL: 9 };
 const EARLY_WITHDRAWAL_FEE = 0.01;
-const MAX_VAULT_DEPOSIT = 1_000_000;
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
-// ------------------ Helper ------------------
 interface AuthenticatedRequest extends Request {
   userId?: string;
 }
 
-async function calculateAccruedRewards(amount: number, apy: number, startDate: Date) {
-  const days = Math.floor((Date.now() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+// DEV ONLY: Load vault key
+function loadVaultKey(token: 'USDC' | 'USDT' | 'SOL'): Keypair {
+  const key = process.env[`${token}_VAULT_PRIVATE_KEY`];
+  if (!key) throw new Error(`Missing ${token}_VAULT_PRIVATE_KEY`);
+  return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(key)));
+}
+// Calculate rewards
+async function calculateAccruedRewards(amount: number, apy: number, startDate: Date): Promise<number> {
+  const days = Math.floor((Date.now() - startDate.getTime()) / (86_400_000));
   const dailyRate = apy / 365;
-  return Number((amount * dailyRate * days).toFixed(2));
+  return Number((amount * dailyRate * days).toFixed(6));
 }
 
 // ------------------ DEPOSIT ------------------
 export const deposit = async (req: AuthenticatedRequest, res: Response) => {
   const { token, amount, vaultPlanId, txHash } = req.body;
-  if (!token || !amount || !vaultPlanId || !txHash)
+  if (!token || amount == null || !vaultPlanId || !txHash)
     return res.status(400).json({ error: 'Missing parameters' });
 
   if (!req.userId) return res.status(401).json({ error: 'Unauthorized' });
+  if (!['USDC', 'USDT', 'SOL'].includes(token))
+    return res.status(400).json({ error: 'Invalid token' });
 
   try {
     const user = await prisma.user.findUnique({ where: { id: req.userId } });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const plan = await prisma.vaultPlan.findUnique({ where: { id: vaultPlanId } });
-    if (!plan || !plan.isActive) return res.status(400).json({ error: 'Invalid vault plan' });
+    if (!plan || !plan.isActive) return res.status(400).json({ error: 'Invalid plan' });
 
-    const masterWalletPubkey = new PublicKey(MASTER_WALLETS[token]);
-    const existingVault = await prisma.vault.findFirst({
-      where: { userId: req.userId, token, vaultPlanId: plan.id },
+    const vaultPubkey = process.env[`${token}_MASTER_WALLET_PUBKEY`];
+    if (!vaultPubkey) return res.status(500).json({ error: 'Vault not configured' });
+
+    // === UPSERT VAULT ===
+    const vault = await prisma.vault.upsert({
+      where: { vaultPlanId_token: { vaultPlanId: plan.id, token } },
+      update: { totalDeposits: { increment: amount } },
+      create: {
+        vaultPlanId: plan.id,
+        name: plan.name,
+        vaultPubkey,
+        token,
+        symbol: token,
+        yieldRate: plan.apy,
+        totalDeposits: amount,
+      },
     });
 
-    const newTotal = (existingVault?.totalDeposits || 0) + amount;
-    if (newTotal > MAX_VAULT_DEPOSIT) return res.status(400).json({ error: 'Vault deposit limit exceeded' });
-
-    let vault = existingVault;
-    if (!vault) {
-      vault = await prisma.vault.create({
-        data: {
-          userId: req.userId,
-          vaultPlanId: plan.id,
-          vaultPubkey: masterWalletPubkey.toBase58(),
-          token,
-          totalDeposits: amount,
-          locked: true,
-          lockPeriodDays: plan.minLockDays,
-          yieldRate: plan.apy,
-        },
-      });
-    } else {
-      vault = await prisma.vault.update({
-        where: { id: vault.id },
-        data: { totalDeposits: newTotal },
-      });
-    }
-
+    // === UPSERT USER VAULT ===
     const lockUntil = new Date();
     lockUntil.setDate(lockUntil.getDate() + plan.minLockDays);
 
-    const userVault = await prisma.userVault.create({
-      data: {
+    const userVault = await prisma.userVault.upsert({
+      where: { userId_vaultId: { userId: req.userId, vaultId: vault.id } },
+      update: {
+        amount: { increment: amount },
+        lockedUntil: { set: lockUntil },
+      },
+      create: {
         userId: req.userId,
-        vaultPubkey: vault.vaultPubkey,
+        vaultId: vault.id,
         walletAddress: user.solanaPubkey,
         token,
         amount,
         lockedUntil: lockUntil,
-        vaultId: vault.id,
       },
     });
+    // ===== VERIFY TX ON-CHAIN =====
+const txInfo = await connection.getParsedTransaction(txHash, { maxSupportedTransactionVersion: 0 });
+if (!txInfo) {
+  logger.warn(`Transaction not found: ${txHash}`);
+  return res.status(400).json({ error: 'Transaction not found' });
+}
 
+
+if (txInfo.meta?.err) {
+  logger.warn(`Transaction ${txHash} failed on-chain: ${JSON.stringify(txInfo.meta.err)}`);
+  return res.status(400).json({ error: 'Transaction failed on-chain' });
+}
+
+
+const topLevel = (txInfo.transaction?.message?.instructions ?? []) as any[];
+const inner = (txInfo.meta?.innerInstructions ?? []).flatMap((ii: any) => ii.instructions ?? []);
+const allInstructions = [...topLevel, ...inner];
+
+// helper: expected values
+const expectedAmountUnits = token === 'SOL'
+  ? amount * LAMPORTS_PER_SOL
+  : amount * Math.pow(10, DECIMALS[token]);
+
+let verified = false;
+
+for (const instr of allInstructions) {
+  // SOL native transfers (system program)
+  if (token === 'SOL' && (instr.program === 'system' || instr.programId?.toBase58?.() === SystemProgram.programId.toBase58())) {
+    const info = instr.parsed?.info;
+    if (!info) continue;
+    const from = info.source;
+    const to = info.destination;
+    const lamports = Number(info.lamports ?? 0);
+    if (from === user.solanaPubkey && to === vaultPubkey && lamports >= expectedAmountUnits * 0.99) {
+      verified = true;
+      break;
+    }
+  }
+
+  
+  const progId = instr.programId?.toBase58?.();
+  const isTokenProgram = progId === TOKEN_PROGRAM_ID.toBase58() || progId === 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+  if (!isTokenProgram) continue;
+
+  
+  const parsed = instr.parsed;
+  if (!parsed || !['transfer', 'transferChecked', 'transferCheckedInstruction', 'transferInstruction'].includes(parsed.type)) continue;
+
+  const info = parsed.info ?? {};
+  
+  const transferred = Number(info.amount ?? info.tokenAmount?.amount ?? 0);
+
+  
+  const src = info.source ?? info.authority ?? '';
+  const dst = info.destination ?? '';
+
+  
+  const userATA = (await getAssociatedTokenAddress(TOKEN_MINTS[token], new PublicKey(user.solanaPubkey))).toBase58();
+  const vaultATA = (await getAssociatedTokenAddress(TOKEN_MINTS[token], new PublicKey(vaultPubkey))).toBase58();
+
+  
+  if (info.mint && info.mint !== TOKEN_MINTS[token].toBase58()) {
+    continue; 
+  }
+
+  
+  const srcMatches = src === user.solanaPubkey || src === userATA;
+  const dstMatches = dst === vaultPubkey || dst === vaultATA;
+
+  if (srcMatches && dstMatches && transferred >= expectedAmountUnits * 0.99) {
+    verified = true;
+    break;
+  }
+}
+
+if (!verified) {
+  logger.warn(`Deposit verification failed for tx ${txHash} token ${token}. parsed info snapshot: ${JSON.stringify(txInfo.transaction?.message?.instructions?.map((i:any)=>i.parsed?.info).slice(0,5))}`);
+  return res.status(400).json({ error: 'Deposit transaction invalid' });
+}
+
+    
+    // === RECORD ===
     await prisma.transaction.create({
       data: {
         txHash,
         userVaultId: userVault.id,
         userId: req.userId,
+        vaultId: vault.id,
         vaultPubkey: vault.vaultPubkey,
         walletAddress: user.solanaPubkey,
         token,
         amount,
-        type: 'deposit',
+        type: TransactionType.deposit,
+        status: TransactionStatus.confirmed,
       },
     });
 
-    return res.status(200).json({
+    return res.json({
       vaultPubkey: vault.vaultPubkey,
-      plan: { name: plan.name, apy: plan.apy, riskType: plan.riskType },
+      plan: { name: plan.name, apy: plan.apy },
       lockedUntil: userVault.lockedUntil,
       deposit: { amount, token },
     });
-  } catch (err) {
-    logger.error(`Deposit error: ${(err as Error).message}`);
+  } catch (err: any) {
+    logger.error(`Deposit error: ${err.message}`);
     return res.status(500).json({ error: 'Deposit failed' });
   }
 };
 
-// ------------------ WITHDRAW INSTRUCTIONS ------------------
-export const withdrawInstructions = async (req: AuthenticatedRequest, res: Response) => {
-  const { userVaultId, allowEarlyWithdrawal } = req.body;
-  if (!userVaultId) return res.status(400).json({ error: 'Missing userVaultId' });
+// ------------------ GET WITHDRAW OPTIONS ------------------
+export const getWithdrawOptions = async (req: AuthenticatedRequest, res: Response) => {
   if (!req.userId) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
-    const userVault = await prisma.userVault.findUnique({ where: { id: userVaultId } });
-    if (!userVault || userVault.userId !== req.userId)
-      return res.status(404).json({ error: 'User vault not found' });
-
-    const vault = await prisma.vault.findUnique({ where: { vaultPubkey: userVault.vaultPubkey } });
-    if (!vault) return res.status(404).json({ error: 'Vault not found' });
-
-    const now = new Date();
-    const stillLocked = userVault.lockedUntil && now < userVault.lockedUntil;
-    if (!allowEarlyWithdrawal && stillLocked)
-      return res.status(400).json({ error: 'Deposit is still locked' });
-
-    const rewards = await calculateAccruedRewards(userVault.amount, vault.yieldRate, userVault.createdAt);
-    let totalAmount = userVault.amount + rewards;
-    let withdrawalFee = 0;
-
-    if (allowEarlyWithdrawal && stillLocked) {
-      withdrawalFee = totalAmount * EARLY_WITHDRAWAL_FEE;
-      totalAmount -= withdrawalFee;
-    }
-
-    const vaultPk = new PublicKey(vault.vaultPubkey);
-    const userPk = new PublicKey(userVault.walletAddress);
-    let instruction: TransactionInstruction;
-
-    if (userVault.token === 'SOL') {
-      instruction = SystemProgram.transfer({
-        fromPubkey: vaultPk,
-        toPubkey: userPk,
-        lamports: BigInt(Math.floor(totalAmount * LAMPORTS_PER_SOL)),
-      });
-    } else {
-      const mint = TOKEN_MINTS[userVault.token];
-      const vaultATA = await getAssociatedTokenAddress(mint, vaultPk);
-      const userATA = await getAssociatedTokenAddress(mint, userPk);
-      instruction = createTransferCheckedInstruction(
-        vaultATA,
-        mint,
-        userATA,
-        vaultPk,
-        BigInt(Math.floor(totalAmount * Math.pow(10, DECIMALS[userVault.token]))),
-        DECIMALS[userVault.token]
-      );
-    }
-
-    return res.status(200).json({
-      instructions: [
-        {
-          programId: instruction.programId.toBase58(),
-          keys: instruction.keys.map(k => ({
-            pubkey: k.pubkey.toBase58(),
-            isSigner: k.isSigner,
-            isWritable: k.isWritable,
-          })),
-          data: instruction.data.toString('base64'),
+    const userVaults = await prisma.userVault.findMany({
+      where: { userId: req.userId, amount: { gt: 0 } },
+      include: {
+        vault: {
+          include: { vaultPlan: true },
         },
-      ],
-      summary: { principal: userVault.amount, rewards, withdrawalFee, totalAmount },
+      },
     });
-  } catch (err) {
-    logger.error(`Withdraw instructions error: ${(err as Error).message}`);
-    return res.status(500).json({ error: 'Failed to generate withdraw instructions' });
+
+    const options = userVaults.map(uv => ({
+      userVaultId: uv.id,
+      vaultPlanId: uv.vault.vaultPlanId,
+      planName: uv.vault.vaultPlan.name,
+      token: uv.token,
+      amount: uv.amount,
+      lockedUntil: uv.lockedUntil,
+      apy: uv.vault.yieldRate,
+      vaultPubkey: uv.vault.vaultPubkey,
+    }));
+
+    return res.json({ options });
+  } catch (err: any) {
+    logger.error(`getWithdrawOptions: ${err.message}`);
+    return res.status(500).json({ error: 'Failed' });
   }
 };
 
+
+
 // ------------------ WITHDRAW ------------------
 export const withdraw = async (req: AuthenticatedRequest, res: Response) => {
-  const { userVaultId, principal, rewards, withdrawalFee = 0, txHash } = req.body;
-  if (!userVaultId || principal === undefined || rewards === undefined || !txHash)
-    return res.status(400).json({ error: 'Missing parameters' });
-  if (!req.userId) return res.status(401).json({ error: 'Unauthorized' });
+  const { vaultPlanId, token, amount, walletAddress } = req.body;
+
+  if (!vaultPlanId || !token || !amount || !walletAddress)
+    return res.status(400).json({ error: "Missing fields" });
+
+  if (!req.userId) return res.status(401).json({ error: "Unauthorized" });
+
+  if (!["USDC", "USDT", "SOL"].includes(token))
+    return res.status(400).json({ error: "Invalid token" });
 
   try {
-    const userVault = await prisma.userVault.findUnique({ where: { id: userVaultId } });
-    if (!userVault || userVault.userId !== req.userId)
-      return res.status(404).json({ error: 'User vault not found' });
+    // === Load vault keypair ===
+    const vaultKeypair = loadVaultKey(token);
 
-    const vault = await prisma.vault.findUnique({ where: { vaultPubkey: userVault.vaultPubkey } });
-    if (!vault) return res.status(404).json({ error: 'Vault not found' });
-
-    const totalAmount = principal + rewards - withdrawalFee;
-
-    await prisma.vault.update({
-      where: { id: vault.id },
-      data: { totalDeposits: vault.totalDeposits - principal },
+    // === Fetch vault data ===
+    const vault = await prisma.vault.findUnique({
+      where: { vaultPlanId_token: { vaultPlanId, token } },
+      include: { vaultPlan: true },
     });
+    if (!vault) return res.status(404).json({ error: "Vault not found" });
 
-    await prisma.userVault.update({
-      where: { id: userVaultId },
-      data: { amount: { decrement: principal } },
+    const userVault = await prisma.userVault.findFirst({
+      where: { userId: req.userId!, vaultId: vault.id },
     });
+    if (!userVault) return res.status(404).json({ error: "No deposit found" });
 
-    await prisma.transaction.createMany({
-      data: [
-        {
-          txHash,
-          userVaultId,
-          userId: req.userId,
-          vaultPubkey: vault.vaultPubkey,
-          walletAddress: userVault.walletAddress,
-          token: userVault.token,
-          amount: totalAmount,
-          type: 'withdraw',
-        },
-        ...(withdrawalFee > 0
-          ? [
-              {
-                txHash: `fee-${txHash}`,
-                userVaultId,
-                userId: req.userId,
-                vaultPubkey: vault.vaultPubkey,
-                walletAddress: userVault.walletAddress,
-                token: userVault.token,
-                amount: withdrawalFee,
-                type: 'fee',
-              },
-            ]
-          : []),
-      ],
-    });
+    if (amount <= 0 || amount > userVault.amount)
+      return res.status(400).json({ error: "Invalid amount" });
 
-    if (rewards > 0) {
-      await prisma.reward.create({
-        data: {
-          userVaultId,
-          vaultPubkey: vault.vaultPubkey,
-          walletAddress: userVault.walletAddress,
-          token: userVault.token,
-          amount: rewards,
-        },
-      });
+    // === Calculate rewards + fee ===
+    const fullRewards = await calculateAccruedRewards(
+      userVault.amount,
+      vault.yieldRate,
+      userVault.createdAt
+    );
+    const rewards = fullRewards * (amount / userVault.amount);
+    const stillLocked =
+      userVault.lockedUntil && new Date() < userVault.lockedUntil;
+
+    let total = amount + rewards;
+    let fee = 0;
+    if (stillLocked) {
+      fee = total * EARLY_WITHDRAWAL_FEE;
+      total -= fee;
     }
 
-    return res.status(200).json({ success: true, totalAmount, rewards, withdrawalFee });
-  } catch (err) {
-    logger.error(`Withdraw error: ${(err as Error).message}`);
-    return res.status(500).json({ error: 'Withdraw failed' });
+    const userPk = new PublicKey(walletAddress);
+
+    // === Build TX ===
+    const tx = new Transaction();
+    tx.feePayer = vaultKeypair.publicKey;
+    const { blockhash } = await connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+
+    if (token === "SOL") {
+      tx.add(
+        SystemProgram.transfer({
+          fromPubkey: vaultKeypair.publicKey,
+          toPubkey: userPk,
+          lamports: Math.floor(total * LAMPORTS_PER_SOL),
+        })
+      );
+    } else {
+      const mint = TOKEN_MINTS[token];
+      const vaultATA = await getAssociatedTokenAddress(mint, vaultKeypair.publicKey);
+      const userATA = await getAssociatedTokenAddress(mint, userPk);
+
+      // Create user ATA if missing
+      let accountInfo;
+      try {
+        accountInfo = await getAccount(connection, userATA);
+      } catch {}
+
+      if (!accountInfo) {
+        tx.add(
+          createAssociatedTokenAccountInstruction(
+            vaultKeypair.publicKey,
+            userATA,
+            userPk,
+            mint
+          )
+        );
+      }
+
+      tx.add(
+        createTransferCheckedInstruction(
+          vaultATA,
+          mint,
+          userATA,
+          vaultKeypair.publicKey,
+          BigInt(Math.floor(total * Math.pow(10, DECIMALS[token]))),
+          DECIMALS[token]
+        )
+      );
+    }
+
+    // === Sign & Send ===
+    tx.sign(vaultKeypair);
+    const rawTx = tx.serialize();
+    const signature = await connection.sendRawTransaction(rawTx, {
+      skipPreflight: false,
+    });
+    await connection.confirmTransaction(signature, "confirmed");
+
+    // === Update DB (atomic transaction) ===
+    await prisma.$transaction(async (txDb) => {
+      await txDb.userVault.update({
+        where: { id: userVault.id },
+        data: { amount: { decrement: amount } },
+      });
+
+      await txDb.transaction.create({
+        data: {
+          txHash: signature,
+          userVaultId: userVault.id,
+          userId: req.userId!,
+          vaultId: vault.id,
+          vaultPubkey: vault.vaultPubkey,
+          walletAddress,
+          token,
+          amount: total,
+          type: TransactionType.withdraw,
+          status: TransactionStatus.confirmed,
+        },
+      });
+
+      if (rewards > 0) {
+        await txDb.reward.create({
+          data: {
+            userVaultId: userVault.id,
+            vaultPubkey: vault.vaultPubkey,
+            walletAddress,
+            token,
+            amount: rewards,
+          },
+        });
+      }
+    });
+
+    return res.json({
+      success: true,
+      txHash: signature,
+      summary: { total, rewards, fee },
+    });
+  } catch (err: any) {
+    logger.error(`withdraw: ${err.message}`);
+    return res.status(500).json({ error: err.message });
   }
 };

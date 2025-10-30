@@ -11,13 +11,17 @@ export const getUserTransactions = async (req: AuthenticatedRequest, res: Respon
     const userId = req.userId;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    // Fetch all transactions and rewards
     const [transactions, rewards] = await Promise.all([
       prisma.transaction.findMany({
         where: { userId },
         include: {
           vault: { select: { name: true } },
-          userVault: { select: { vaultPubkey: true } },
+          userVault: {
+            select: {
+              walletAddress: true,
+              vault: { select: { vaultPubkey: true } }
+            }
+          }
         },
         orderBy: { timestamp: 'desc' },
       }),
@@ -27,7 +31,6 @@ export const getUserTransactions = async (req: AuthenticatedRequest, res: Respon
       }),
     ]);
 
-    // Map rewards to transaction-like objects
     const rewardTxs = rewards.map(r => ({
       id: r.id,
       type: 'reward',
@@ -38,8 +41,9 @@ export const getUserTransactions = async (req: AuthenticatedRequest, res: Respon
       timestamp: r.timestamp,
     }));
 
-    // Combine and sort all by timestamp descending
-    const allTxs = [...transactions, ...rewardTxs].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+    const allTxs = [...transactions, ...rewardTxs].sort(
+      (a, b) => b.timestamp.getTime() - a.timestamp.getTime()
+    );
 
     return res.status(200).json({ transactions: allTxs });
   } catch (err) {

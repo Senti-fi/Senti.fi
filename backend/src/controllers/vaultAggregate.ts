@@ -12,37 +12,53 @@ export const getUserVaultsWithDetails = async (req: Request, res: Response) => {
   if (!userId) return res.status(400).json({ error: 'Missing userId' });
 
   try {
+    // Fetch only vaults that have a positive amount
     const userVaults = await prisma.userVault.findMany({
-      where: { userId },
+      where: {
+        userId,
+        amount: { gt: 0 },
+      },
       include: {
-        vault: true,
+        vault: {
+          include: { vaultPlan: true },
+        },
         rewards: true,
       },
     });
 
-    const enrichedVaults = userVaults.map(uv => {
-      const totalRewards = uv.rewards.reduce((sum, r) => sum + r.amount, 0);
-      return {
-        vaultName: uv.vault.name,
-        vaultPubkey: uv.vault.vaultPubkey,
-        token: uv.token,
-        amount: uv.amount,
-        yieldRate: uv.vault.yieldRate,
-        lockedUntil: uv.lockedUntil,
-        isUnlocked: !uv.lockedUntil || new Date() >= new Date(uv.lockedUntil),
-        rewardsAccrued: totalRewards,
-      };
-    });
+    const enrichedVaults = userVaults
+      
+      .filter(uv => uv.amount > 0)
+      .map(uv => {
+        const totalRewards = uv.rewards.reduce((sum, r) => sum + r.amount, 0);
 
-    return res.status(200).json({ userId, vaults: enrichedVaults });
-  } catch (err) {
-    logger.error(`getUserVaultsWithDetails failed: ${(err as Error).message}`);
+        return {
+          userVaultId: uv.id,
+          vaultId: uv.vault.id,
+          vaultPlanId: uv.vault.vaultPlanId,
+          vaultName: uv.vault.vaultPlan.name,
+          vaultPubkey: uv.vault.vaultPubkey,
+          token: uv.token,
+          amount: uv.amount,
+          yieldRate: uv.vault.vaultPlan.apy,
+          lockedUntil: uv.lockedUntil,
+          isUnlocked: !uv.lockedUntil || new Date() >= new Date(uv.lockedUntil),
+          rewardsAccrued: totalRewards,
+        };
+      });
+
+    return res.status(200).json({
+      userId,
+      vaults: enrichedVaults,
+      count: enrichedVaults.length,
+    });
+  } catch (err: any) {
+    logger.error(`getUserVaultsWithDetails failed: ${err.message}`);
     return res.status(500).json({ error: 'Failed to fetch user vaults with details' });
   } finally {
     await prisma.$disconnect();
   }
 };
-
 /**
  * Fetch all vaults for a specific token sorted by yieldRate descending
  */
