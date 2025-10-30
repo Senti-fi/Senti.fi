@@ -37,6 +37,10 @@ app.use(
   })
 );
 
+app.get('/', (req, res) => {
+  res.send('Backend is running inside Docker!');
+});
+
 
 console.log('Mounting routes...');
 app.use('/auth', authRoutes);
@@ -52,11 +56,9 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
   res.status(500).json({ error: 'Internal server error' });
 });
 
-
 app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
 });
-
 
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received. Shutting down gracefully...');

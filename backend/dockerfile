@@ -9,4 +9,4 @@ COPY . .
 ENV PRISMA_CLI_BINARY_TARGETS="linux-arm64-openssl-3.0.x"
 RUN npx prisma generate
 EXPOSE 5000
-CMD ["npm", "start"]
+CMD ["npx", "ts-node-dev", "--respawn", "--transpile-only", "src/server.ts"]

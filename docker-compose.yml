@@ -29,6 +29,7 @@ services:
     volumes:
       - ./backend/src:/app/src
       - ./backend/prisma:/app/prisma 
+      - /app/node_modules
     command: ["npm", "run", "dev"]
     depends_on:
       - db  # <-- ADDED: Waits for the DB to be ready
