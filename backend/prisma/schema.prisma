@@ -1,0 +1,134 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TransactionType {
+  deposit
+  withdraw
+  fee
+  reward
+  onramp
+  offramp
+}
+
+enum TransactionStatus {
+  pending
+  confirmed
+  failed
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String?  @unique
+  provider     String
+  solanaPubkey String   @unique
+  createdAt    DateTime @default(now())
+  lastSeen     DateTime @updatedAt
+
+  userVaults   UserVault[]
+  transactions Transaction[] @relation("UserTransactions")
+
+  @@map("users")
+}
+
+model VaultPlan {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  riskType    String
+  apy         Float
+  minLockDays Int
+  minDeposit  Float
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  vaults Vault[]
+
+  @@map("vault_plans")
+}
+
+model Vault {
+  id            String   @id @default(uuid()) @db.Uuid
+  vaultPlanId   String?  @db.Uuid
+  name          String
+  vaultPubkey   String   @unique
+  token         String
+  symbol        String
+  yieldRate     Float
+  totalDeposits Float    @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  vaultPlan    VaultPlan?    @relation(fields: [vaultPlanId], references: [id], onDelete: Cascade)
+  userVaults   UserVault[]
+  transactions Transaction[] @relation("VaultTransactions")
+
+  @@map("vaults")
+}
+
+model UserVault {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @db.Uuid
+  vaultId       String    @db.Uuid
+  walletAddress String
+  token         String
+  amount        Float     @default(0)
+  lockedUntil   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vault        Vault         @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+  rewards      Reward[]
+
+  @@index([userId])
+  @@index([vaultId])
+  @@map("user_vaults")
+}
+
+model Transaction {
+  id            String            @id @default(uuid()) @db.Uuid
+  txHash        String            @unique
+  userVaultId   String?           @db.Uuid
+  vaultId       String?           @db.Uuid
+  userId        String            @db.Uuid
+  vaultPubkey   String?
+  walletAddress String?
+  token         String
+  amount        Float
+  type          TransactionType
+  status        TransactionStatus @default(pending)
+  provider      String?
+  recipient     String?
+  timestamp     DateTime          @default(now())
+
+  userVault UserVault? @relation(fields: [userVaultId], references: [id])
+  user      User       @relation("UserTransactions", fields: [userId], references: [id])
+  vault     Vault?     @relation("VaultTransactions", fields: [vaultId], references: [id])
+
+  @@index([userId])
+  @@index([token])
+  @@map("transactions")
+}
+
+model Reward {
+  id            String   @id @default(uuid()) @db.Uuid
+  userVaultId   String   @db.Uuid
+  vaultPubkey   String
+  walletAddress String
+  token         String
+  amount        Float
+  timestamp     DateTime @default(now())
+
+  userVault UserVault @relation(fields: [userVaultId], references: [id], onDelete: Cascade)
+
+  @@index([userVaultId])
+  @@map("rewards")
+}

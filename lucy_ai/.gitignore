@@ -1,0 +1,93 @@
+# -------------------------------------------------
+# Node / JavaScript / Next.js
+# -------------------------------------------------
+node_modules/
+.next/
+out/
+build/
+
+# Yarn / Pnpm
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# Testing / Coverage
+coverage/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Env files (commit only if explicitly needed)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Vercel / Deployment
+.vercel/
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Tooling caches
+.turbo/
+.swc/
+.cache/
+.parcel-cache/
+
+# -------------------------------------------------
+# Python / Backend
+# -------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+.venv/
+venv/
+ENV/
+env/
+.python-version
+db.sqlite3
+*.sqlite3
+
+# Testing / Coverage
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# -------------------------------------------------
+# OS / IDE
+# -------------------------------------------------
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# VSCode / JetBrains / Other editors
+.vscode/
+.idea/
+*.iml
+*.code-workspace
+.history/
+
+# -------------------------------------------------
+# Misc
+# -------------------------------------------------
+*.pem

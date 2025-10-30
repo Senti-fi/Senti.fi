@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  lucy-ai-service:
+    build:
+      context: ./lucy_ai 
+      dockerfile: Dockerfile 
+    container_name: lucy_ai_service_dev
+    env_file:
+      - ./lucy_ai/.env 
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./lucy_ai/src:/app/src 
+    command: ["uvicorn", "src.lucy_ai.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    depends_on:
+      - senti-backend
+    
+
+  senti-backend:
+    build:
+      context: ./backend 
+      dockerfile: Dockerfile 
+    container_name: senti_backend_dev
+    env_file:
+      - ./backend/.env 
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma 
+    command: ["npm", "run", "dev"]
+    depends_on:
+      - db  # <-- ADDED: Waits for the DB to be ready
+
+  # --- ADD THIS ENTIRE DATABASE SERVICE ---
+  db:
+    image: postgres:14-alpine # Use a specific postgres version
+    container_name: senti_postgres_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: senti
+    ports:
+      - "5432:5432" # Exposes the DB to your host machine (e.g., for DBeaver/PgAdmin)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+
+# --- ADD THIS VOLUME AT THE END ---
+volumes:
+  postgres_data:

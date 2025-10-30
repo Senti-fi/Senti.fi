@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-dotenv
+openai
+httpx
+solana
+langchain
+langchain-openai
+langchain-google-genai
+solders
+python-jose[cryptography]
