@@ -32,22 +32,23 @@ services:
       - /app/node_modules
     command: ["npm", "run", "dev"]
     depends_on:
-      - db  # <-- ADDED: Waits for the DB to be ready
+      - db  
 
-  # --- ADD THIS ENTIRE DATABASE SERVICE ---
+
+
+    
   db:
-    image: postgres:14-alpine # Use a specific postgres version
+    image: postgres:14-alpine 
     container_name: senti_postgres_db
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: admin123
       POSTGRES_DB: senti
     ports:
-      - "5432:5432" # Exposes the DB to your host machine (e.g., for DBeaver/PgAdmin)
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: always
 
-# --- ADD THIS VOLUME AT THE END ---
 volumes:
   postgres_data:

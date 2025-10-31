@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+:root {
+  --background: #171717;
+  --foreground: #ffffff;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-inter), system-ui, -apple-system, sans-serif;
+}
+
+/* Make dots gray and rounded */
+.swiper-pagination-bullet {
+  background-color: #333333; /* gray-300 */
+  opacity: 1;
+  width: 8px;
+  height: 6px;
+  border-radius: 9999px;
+  transition: all 0.3s ease;
+}
+
+/* Active dot: wider and darker */
+.swiper-pagination-bullet-active {
+  background-color: #A4A4A4; /* gray-800 */
+  width: 33px;
+  height: 6px;
+  border-radius: 9999px;
+}

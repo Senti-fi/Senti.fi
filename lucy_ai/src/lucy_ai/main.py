@@ -31,7 +31,8 @@ class Settings(BaseSettings):
     SOLANA_RPC_URL: str = "https://api.devnet.solana.com"
 
     # CORS Configuration
-    CORS_ORIGINS: str = "http://localhost:3000"
+    # Accept either a comma-separated list or a single origin
+    CORS_ORIGINS: str = "http://localhost:3002"
     CORS_CREDENTIALS: bool = True
     CORS_METHODS: str = "*"
     CORS_HEADERS: str = "*"
@@ -69,8 +70,36 @@ app = FastAPI(
     lifespan=lifespan # Use the new lifespan manager
 )
 
+# --- CORS middleware (IMPORTANT: before routers are included) ---
+# Parse origins
+if isinstance(settings.CORS_ORIGINS, str) and settings.CORS_ORIGINS.strip() != "":
+    if settings.CORS_ORIGINS.strip() == "*":
+        parsed_origins = ["*"]
+    else:
+        parsed_origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
+else:
+    parsed_origins = []
+
+# If credentials are enabled, wildcard origin is not allowed in browsers.
+if settings.CORS_CREDENTIALS and parsed_origins == ["*"]:
+    # Replace wildcard with explicit localhost dev origin
+    logger.warning("CORS credentials requested but origins was '*'. Replacing with http://localhost:3002 for development.")
+    parsed_origins = ["http://localhost:3002"]
+
+# parse methods/headers
+allow_methods = ["*"] if settings.CORS_METHODS == "*" else [m.strip() for m in settings.CORS_METHODS.split(",")]
+allow_headers = ["*"] if settings.CORS_HEADERS == "*" else [h.strip() for h in settings.CORS_HEADERS.split(",")]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=parsed_origins or ["*"],
+    allow_credentials=bool(settings.CORS_CREDENTIALS),
+    allow_methods=allow_methods,
+    allow_headers=allow_headers,
+)
+
 # --- Include API Router ---
-# Import router here, after app is defined
+# Import router here, after app is defined and middleware added
 from .api.endpoints import router as api_router
 app.include_router(api_router, prefix="/api/v1")
 
@@ -79,6 +108,7 @@ app.include_router(api_router, prefix="/api/v1")
 async def read_root():
     """Simple health check endpoint."""
     logger.debug("Root endpoint '/' accessed.")
+
     return {"status": "ok", "message": "Lucy AI Service is running!"}
 
 # --- Uvicorn Runner (for direct execution `python src/lucy_ai/main.py`) ---
