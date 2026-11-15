@@ -4,9 +4,9 @@
   "description": "Backend for Senti Solana Wallet and Vault System",
   "main": "dist/server.ts",
   "scripts": {
-    "build": "node api.js && tsc",
-    "start": "node api.js && node dist/server.ts",
-    "dev": "node api.js && ts-node-dev --respawn --transpile-only src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.ts",
+    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev"
   },
